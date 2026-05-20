@@ -1,7 +1,8 @@
 import SwiftUI
 
 struct GameView: View {
-    @State private var engine = GameEngine()
+    @State var engine: GameEngine
+    let router: AppRouter
 
     var body: some View {
         ZStack {
@@ -10,19 +11,52 @@ struct GameView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 12) {
+                topBar
                 BossBar(engine: engine)
                 BattlefieldView(engine: engine)
                     .frame(maxHeight: .infinity)
                 PlayerBar(engine: engine)
-                HandView(engine: engine)
+                HandView(engine: engine, onPlay: handlePlay)
                 LogStrip(log: engine.log)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
 
             if engine.outcome != .ongoing {
-                OutcomeOverlay(engine: engine)
+                OutcomeOverlay(engine: engine, router: router)
             }
+        }
+    }
+
+    private var topBar: some View {
+        HStack {
+            Button {
+                SaveManager.save(engine)
+                router.goToMenu()
+            } label: {
+                Image(systemName: "chevron.left")
+                    .font(.title3)
+                    .foregroundStyle(.white)
+                    .padding(8)
+                    .background(Color.white.opacity(0.1), in: Circle())
+            }
+            Spacer()
+            Text("BATTLE")
+                .font(.caption.bold())
+                .tracking(2)
+                .foregroundStyle(.white.opacity(0.6))
+            Spacer()
+            // Spacer placeholder to balance back button
+            Color.clear.frame(width: 36, height: 36)
+        }
+    }
+
+    private func handlePlay(_ type: CardType) {
+        engine.play(type)
+        if engine.outcome == .ongoing {
+            SaveManager.save(engine)
+        } else {
+            SaveManager.clear()
         }
     }
 }
@@ -65,16 +99,11 @@ struct BattlefieldView: View {
             let layerCount = max(1, engine.layers)
             let rowHeight = geo.size.height / CGFloat(layerCount)
 
-            ZStack(alignment: .top) {
-                VStack(spacing: 0) {
-                    // top of view = nearest to boss (highest layer index)
-                    ForEach(layerStackTopDown(), id: \.self) { layerIndex in
-                        LayerRow(layerIndex: layerIndex,
-                                 entities: entitiesInLayer(layerIndex),
-                                 isTop: layerIndex == layerCount - 1,
-                                 isBottom: layerIndex == 0)
-                            .frame(height: rowHeight)
-                    }
+            VStack(spacing: 0) {
+                ForEach(layerStackTopDown(), id: \.self) { layerIndex in
+                    LayerRow(layerIndex: layerIndex,
+                             entities: entitiesInLayer(layerIndex))
+                        .frame(height: rowHeight)
                 }
             }
             .background(Color.black.opacity(0.3))
@@ -87,7 +116,6 @@ struct BattlefieldView: View {
     }
 
     private func layerStackTopDown() -> [Int] {
-        // Show highest layer at top of view (closest to boss), 0 at bottom (closest to player)
         Array((0..<engine.layers).reversed())
     }
 
@@ -99,12 +127,9 @@ struct BattlefieldView: View {
 struct LayerRow: View {
     let layerIndex: Int
     let entities: [Entity]
-    let isTop: Bool
-    let isBottom: Bool
 
     var body: some View {
         ZStack {
-            // Lane separators
             Rectangle()
                 .fill(Color.white.opacity(layerIndex % 2 == 0 ? 0.03 : 0.06))
 
@@ -179,11 +204,16 @@ struct PlayerBar: View {
 
 struct HandView: View {
     let engine: GameEngine
+    let onPlay: (CardType) -> Void
+
     var body: some View {
         HStack(spacing: 10) {
             ForEach(CardType.allCases, id: \.self) { type in
                 if let card = engine.currentCard(for: type) {
-                    CardView(card: card) { engine.play(type) }
+                    HandCardView(card: card,
+                                 remaining: engine.remainingInPile(type)) {
+                        onPlay(type)
+                    }
                 } else {
                     EmptyCardSlot(type: type)
                 }
@@ -192,16 +222,16 @@ struct HandView: View {
     }
 }
 
-struct CardView: View {
+struct HandCardView: View {
     let card: Card
+    let remaining: Int
     let onTap: () -> Void
+
     var body: some View {
         Button(action: onTap) {
             VStack(spacing: 6) {
-                Image(systemName: card.type.icon)
-                    .font(.title)
-                Text(card.name)
-                    .font(.headline)
+                Image(systemName: card.type.icon).font(.title)
+                Text(card.name).font(.headline)
                 Text(card.subtitle)
                     .font(.caption2)
                     .multilineTextAlignment(.center)
@@ -211,9 +241,12 @@ struct CardView: View {
                         .font(.title2.bold().monospacedDigit())
                         .foregroundStyle(.white)
                 }
+                Text("pile: \(remaining)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.5))
             }
             .padding(10)
-            .frame(maxWidth: .infinity, minHeight: 140)
+            .frame(maxWidth: .infinity, minHeight: 150)
             .background(card.type.color.opacity(0.85),
                         in: RoundedRectangle(cornerRadius: 14))
             .overlay(
@@ -234,7 +267,7 @@ struct EmptyCardSlot: View {
                 .font(.title)
                 .foregroundStyle(.white.opacity(0.2))
         }
-        .frame(maxWidth: .infinity, minHeight: 140)
+        .frame(maxWidth: .infinity, minHeight: 150)
         .background(Color.white.opacity(0.05),
                     in: RoundedRectangle(cornerRadius: 14))
     }
@@ -297,10 +330,12 @@ struct LogStrip: View {
     }
 }
 
-// MARK: - Outcome
+// MARK: - Outcome overlay
 
 struct OutcomeOverlay: View {
     let engine: GameEngine
+    let router: AppRouter
+
     var body: some View {
         ZStack {
             Color.black.opacity(0.7).ignoresSafeArea()
@@ -308,12 +343,23 @@ struct OutcomeOverlay: View {
                 Text(engine.outcome == .victory ? "VICTORY" : "DEFEAT")
                     .font(.largeTitle.bold())
                     .foregroundStyle(engine.outcome == .victory ? .green : .red)
-                Button("Play Again") { engine.startNewGame() }
+                VStack(spacing: 10) {
+                    Button("Play Again") {
+                        SaveManager.clear()
+                        router.startGame(with: engine.deck)
+                    }
                     .font(.headline)
                     .padding(.horizontal, 24).padding(.vertical, 12)
-                    .background(.white.opacity(0.15),
-                                in: Capsule())
+                    .background(.white.opacity(0.15), in: Capsule())
                     .foregroundStyle(.white)
+
+                    Button("Main Menu") {
+                        SaveManager.clear()
+                        router.goToMenu()
+                    }
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.7))
+                }
             }
             .padding(40)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20))
